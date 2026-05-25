@@ -1,0 +1,11 @@
+LICENSE
+README.md
+pyproject.toml
+src/agent_message_validator/__init__.py
+src/agent_message_validator/core.py
+src/agent_message_validator/py.typed
+src/agent_message_validator.egg-info/PKG-INFO
+src/agent_message_validator.egg-info/SOURCES.txt
+src/agent_message_validator.egg-info/dependency_links.txt
+src/agent_message_validator.egg-info/top_level.txt
+tests/test_agent_message_validator.py
