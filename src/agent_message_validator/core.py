@@ -25,14 +25,18 @@ class MessageValidationError(Exception):
 # ---------------------------------------------------------------------------
 
 def _content_blocks(message: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return content as a list of blocks regardless of string/list form."""
+    """Return content as a list of dict blocks regardless of string/list form.
+
+    Non-dict blocks inside a content list are ignored here so that callers can
+    iterate safely; structural validation of block shape is handled separately.
+    """
     content = message.get("content", "")
     if isinstance(content, str):
         if content.strip():
             return [{"type": "text", "text": content}]
         return []
     if isinstance(content, list):
-        return content
+        return [b for b in content if isinstance(b, dict)]
     return []
 
 
@@ -99,13 +103,18 @@ def validate_messages(
     """Validate an Anthropic-style message list.
 
     Checks performed:
+    0. ``messages`` is a list and every item is a dict.
     1. No consecutive messages with the same role.
-    2. Every tool_use block has a matching tool_result in the next message.
+    2. Every tool_use block has a matching tool_result.
     3. No orphan tool_result blocks (no prior tool_use).
     4. Content is not empty (unless allow_empty_content=True).
     5. First message role is 'user' (not 'assistant').
     6. All messages have a 'role' key.
     7. All messages have a 'content' key.
+
+    The function never raises on malformed input unless ``strict`` is True: a
+    non-list argument or a non-dict message produces an ordinary error in the
+    result rather than a TypeError/AttributeError.
 
     Args:
         messages: list of message dicts.
@@ -120,31 +129,53 @@ def validate_messages(
     """
     errors: list[str] = []
 
-    if not messages:
-        result = ValidationResult(ok=True, errors=[], message_count=0)
-        if strict and not result.ok:
+    # 0. Top-level container must be a list (tuples are accepted as list-like).
+    if not isinstance(messages, (list, tuple)):
+        result = ValidationResult(
+            ok=False,
+            errors=[f"messages must be a list, got {type(messages).__name__}"],
+            message_count=0,
+        )
+        if strict:
             raise MessageValidationError(result.summary())
         return result
 
+    if not messages:
+        result = ValidationResult(ok=True, errors=[], message_count=0)
+        # An empty list is valid, so strict mode never raises here.
+        return result
+
+    # 0b. Every item must be a dict; non-dict items are reported and skipped by
+    # the structural checks below so a single bad entry cannot crash validation.
+    non_dict_indices = {i for i, msg in enumerate(messages) if not isinstance(msg, dict)}
+    for i in sorted(non_dict_indices):
+        errors.append(
+            f"message[{i}] must be a dict, got {type(messages[i]).__name__}"
+        )
+
+    def _role_at(index: int) -> Any:
+        """Role of a message, or None for non-dict messages."""
+        msg = messages[index]
+        return msg.get("role") if isinstance(msg, dict) else None
+
     # 1. All messages have 'role'
     for i, msg in enumerate(messages):
-        if "role" not in msg:
+        if isinstance(msg, dict) and "role" not in msg:
             errors.append(f"message[{i}] missing 'role' key")
 
     # 2. All messages have 'content'
     for i, msg in enumerate(messages):
-        if "content" not in msg:
+        if isinstance(msg, dict) and "content" not in msg:
             errors.append(f"message[{i}] missing 'content' key")
 
     # 3. First message must be 'user'
-    first_role = messages[0].get("role")
-    if first_role == "assistant":
+    if _role_at(0) == "assistant":
         errors.append("first message must have role 'user', not 'assistant'")
 
     # 4. No consecutive same-role messages
     for i in range(1, len(messages)):
-        prev_role = messages[i - 1].get("role")
-        curr_role = messages[i].get("role")
+        prev_role = _role_at(i - 1)
+        curr_role = _role_at(i)
         if prev_role and curr_role and prev_role == curr_role:
             errors.append(
                 f"consecutive same-role messages at index {i - 1} and {i} (role='{curr_role}')"
@@ -153,6 +184,8 @@ def validate_messages(
     # 5. Empty content check
     if not allow_empty_content:
         for i, msg in enumerate(messages):
+            if not isinstance(msg, dict):
+                continue
             content = msg.get("content", "")
             if isinstance(content, str) and not content.strip():
                 errors.append(f"message[{i}] has empty content (role='{msg.get('role', '?')}')")
@@ -164,6 +197,8 @@ def validate_messages(
     pending_tool_use_ids: list[str] = []  # ids waiting for a result
 
     for i, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            continue
         role = msg.get("role", "")
 
         if role == "assistant":
